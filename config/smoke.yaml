@@ -1,0 +1,56 @@
+# Smoke-test configuration.
+# Designed to finish in ~5-10 minutes on CPU.
+# Use to validate that the pipeline runs end-to-end before the full job.
+datasets:
+  - name: scifact
+    type: beir
+    n_queries: 60
+
+retrieval:
+  top_k: 10
+  bm25_k1: 1.5
+  bm25_b: 0.75
+
+models:
+  nli: cross-encoder/nli-deberta-v3-small
+  embedder: sentence-transformers/all-MiniLM-L6-v2
+  spacy: en_core_web_sm
+
+features:
+  redundancy_threshold: 0.85
+  short_max: 200
+  long_min: 800
+
+itemsets:
+  min_support: 0.05
+  max_len: 3
+  max_patterns: 80
+
+# Looser pattern thresholds for 60-query smoke. Real defaults are in default.yaml.
+patterns:
+  min_support: 0.05
+  min_class_count: 3
+  min_lift: 1.2
+  max_len: 3
+  fdr_alpha: 0.20
+  rare_min_count_pos: 2
+  rare_max_support: 0.10
+  rare_min_p_pos: 0.75
+  stack_top_k: 20
+  stack_max_query_jaccard: 0.5
+
+mining:
+  K_grid: [4, 6, 8]
+  random_state: 42
+  methods: [gmm, kmeans]
+
+paths:
+  data_dir: data
+  cache_dir: cache_smoke
+  out_dir: outputs_smoke
+
+device: auto
+
+batch_size:
+  nli: 16
+  embed: 32

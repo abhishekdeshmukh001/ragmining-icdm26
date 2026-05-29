@@ -1,0 +1,60 @@
+# Robustness variant B: BM25 retrieval (reused) + Phi-3.5-mini-instruct generator.
+# Identical to default.yaml except for: paths.out_dir, labels (set to 'generation'
+# directly), and generation.model.
+datasets:
+  - name: scifact
+    type: beir
+    n_queries: 300
+  - name: nfcorpus
+    type: beir
+    n_queries: 300
+  - name: fiqa
+    type: beir
+    n_queries: 200
+retrieval:
+  top_k: 10
+  bm25_k1: 1.5
+  bm25_b: 0.75
+models:
+  nli: cross-encoder/nli-deberta-v3-small
+  embedder: sentence-transformers/all-MiniLM-L6-v2
+  spacy: en_core_web_sm
+features:
+  redundancy_threshold: 0.85
+  short_max: 200
+  long_min: 800
+itemsets:
+  min_support: 0.05
+  max_len: 3
+  max_patterns: 200
+patterns:
+  min_support: 0.03
+  min_class_count: 5
+  min_lift: 1.3
+  max_len: 3
+  fdr_alpha: 0.10
+  rare_min_count_pos: 2
+  rare_max_support: 0.05
+  rare_min_p_pos: 0.80
+  stack_top_k: 30
+  stack_max_query_jaccard: 0.5
+mining:
+  K_grid: [4, 6, 8, 10, 12, 16]
+  random_state: 42
+  methods: [gmm, kmeans]
+paths:
+  data_dir: data
+  cache_dir: cache
+  out_dir: outputs_phi                         
+device: auto
+batch_size:
+  nli: 32
+  embed: 64
+labels: generation                             
+condition_on_retrieval_success: true
+generation:
+  model: microsoft/Phi-3.5-mini-instruct       
+  max_new_tokens: 80
+  label_threshold_mode: auto
+  label_threshold: 0.40
+  target_fail_rate: 0.35

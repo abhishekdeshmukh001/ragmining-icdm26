@@ -1,0 +1,148 @@
+"""04b_mine_patterns.py
+Contrast-set / emerging-pattern mining over evidence-set attribute itemsets.
+
+Replaces 04_states.py as the primary discovery step. The mined object is now a
+ranked list of statistically significant failure-enriched patterns, plus a
+descriptive list of rare-but-catastrophic patterns.
+
+Reads:    outputs/passage_attrs.pkl, outputs/retrievals.pkl
+Writes:   outputs/contrast_patterns.csv          (Table 1 of the paper)
+          outputs/success_patterns.csv           (negative-class control)
+          outputs/rare_high_impact_patterns.csv  (appendix)
+          outputs/diagnostic_univariate.csv      (sanity check before mining)
+          outputs/pattern_transactions.pkl       (boolean matrix for downstream eval)
+          outputs/failure_labels.csv             (also written here for self-contained reruns)
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.features.itemsets import set_to_items  # noqa: E402
+from src.labels.failure import build_retrieval_failure_labels  # noqa: E402
+from src.mining.contrast_patterns import (  # noqa: E402
+    diagnostic_table,
+    mine_contrast_patterns,
+    mine_rare_high_impact_patterns,
+)
+from src.utils.io import ensure_dir, load_pickle, save_csv, save_pickle  # noqa: E402
+from src.utils.logging import get_logger  # noqa: E402
+
+
+def build_transaction_matrix(per_query_attrs):
+    """per_query_attrs: dict qid -> list of passage-attribute dicts.
+    Returns a (qids, boolean DataFrame) where columns are 'attr=val' items
+    present in at least one passage of each evidence set."""
+    items_per_q, qids = [], []
+    for qid, attrs in per_query_attrs.items():
+        if not attrs:
+            continue
+        items_per_q.append(set_to_items(attrs))
+        qids.append(qid)
+    all_items = sorted({it for s in items_per_q for it in s})
+    M = np.zeros((len(items_per_q), len(all_items)), dtype=bool)
+    col = {it: j for j, it in enumerate(all_items)}
+    for i, s in enumerate(items_per_q):
+        for it in s:
+            M[i, col[it]] = True
+    return qids, pd.DataFrame(M, index=qids, columns=all_items)
+
+
+def main(cfg_path):
+    cfg = yaml.safe_load(Path(cfg_path).read_text(encoding="utf-8"))
+    out_dir = Path(cfg["paths"]["out_dir"])
+    ensure_dir(out_dir)
+    log = get_logger(log_file=os.path.join("logs", "04b_mine_patterns.log"))
+    pcfg = cfg.get("patterns", {})  # tolerate older configs by defaulting
+
+    per_query_attrs = load_pickle(out_dir / "passage_attrs.pkl")
+    qids, T = build_transaction_matrix(per_query_attrs)
+    log.info(f"Transactions: {T.shape[0]} queries x {T.shape[1]} items")
+    save_pickle({"qids": qids, "transactions": T}, out_dir / "pattern_transactions.pkl")
+
+    blob = load_pickle(out_dir / "retrievals.pkl")
+    failure = build_retrieval_failure_labels(
+        blob["retrievals"], blob["qrels"], top_k=cfg["retrieval"]["top_k"]
+    )
+    save_csv(
+        pd.DataFrame([{"qid": q, **failure[q]} for q in failure]),
+        out_dir / "failure_labels.csv",
+    )
+    y_dict = {q: failure[q]["fail"] for q in failure}
+    y = np.array([y_dict.get(q) for q in qids])
+    keep = np.array([v is not None for v in y])
+    qids = [q for q, k in zip(qids, keep) if k]
+    T = T.loc[qids]
+    y = np.array([y_dict[q] for q in qids]).astype(int)
+
+    n_pos = int(y.sum())
+    n_neg = len(y) - n_pos
+    base_rate = n_pos / len(y) if len(y) else 0.0
+    log.info(f"Labels: n={len(y)}, n_pos={n_pos}, n_neg={n_neg}, base_rate={base_rate:.3f}")
+
+    # --- 0) Diagnostic table: which single items are even informative?
+    diag = diagnostic_table(T, y)
+    save_csv(diag, out_dir / "diagnostic_univariate.csv")
+    top = diag.head(8)[["item", "support", "p_pos_given", "lift"]]
+    log.info("Top-8 single items by lift:\n" + top.to_string(index=False))
+
+    # --- 1) Headline contribution: failure-enriched contrast patterns
+    fail_patterns = mine_contrast_patterns(
+        T, y,
+        min_support=pcfg.get("min_support", 0.05),
+        min_class_count=pcfg.get("min_class_count", 3),
+        min_lift=pcfg.get("min_lift", 1.3),
+        max_len=pcfg.get("max_len", 3),
+        fdr_alpha=pcfg.get("fdr_alpha", 0.10),
+        direction="failure",
+    )
+    save_csv(
+        fail_patterns.drop(columns=["items"]) if "items" in fail_patterns.columns else fail_patterns,
+        out_dir / "contrast_patterns.csv",
+    )
+    save_pickle(fail_patterns, out_dir / "contrast_patterns.pkl")
+    log.info(f"Failure-enriched contrast patterns: {len(fail_patterns)}")
+    if len(fail_patterns):
+        log.info("Top-5:\n" + fail_patterns.head(5)[["pattern", "support", "p_pos_given", "lift", "q_value"]].to_string(index=False))
+
+    # --- 2) Sanity check: success-enriched patterns
+    succ_patterns = mine_contrast_patterns(
+        T, y,
+        min_support=pcfg.get("min_support", 0.05),
+        min_class_count=pcfg.get("min_class_count", 3),
+        min_lift=pcfg.get("min_lift", 1.3),
+        max_len=pcfg.get("max_len", 3),
+        fdr_alpha=pcfg.get("fdr_alpha", 0.10),
+        direction="success",
+    )
+    save_csv(
+        succ_patterns.drop(columns=["items"]) if "items" in succ_patterns.columns else succ_patterns,
+        out_dir / "success_patterns.csv",
+    )
+    log.info(f"Success-enriched contrast patterns: {len(succ_patterns)}")
+
+    # --- 3) Appendix: rare, high-impact patterns
+    rare = mine_rare_high_impact_patterns(
+        T, y,
+        min_count_pos=pcfg.get("rare_min_count_pos", 2),
+        max_support=pcfg.get("rare_max_support", 0.05),
+        min_p_pos=pcfg.get("rare_min_p_pos", 0.80),
+        max_len=pcfg.get("max_len", 3),
+    )
+    save_csv(
+        rare.drop(columns=["items"]) if "items" in rare.columns else rare,
+        out_dir / "rare_high_impact_patterns.csv",
+    )
+    log.info(f"Rare high-impact patterns: {len(rare)}")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True)
+    main(ap.parse_args().config)

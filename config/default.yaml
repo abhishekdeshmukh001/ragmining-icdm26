@@ -1,0 +1,98 @@
+# Default (full) run configuration.
+# Notes:
+#   - Three BEIR datasets give 800 queries / ~185 failures at 23% base rate,
+#     which is more than enough for the contrast-pattern story.
+#   - HotpotQA is supported via direct download but disabled by default to
+#     keep the pipeline dependency-free; uncomment to add it back.
+#   - top_k=10 is the standard RAG depth and matches RewriteRisk.
+datasets:
+  - name: scifact
+    type: beir
+    n_queries: 300
+  - name: nfcorpus
+    type: beir
+    n_queries: 300
+  - name: fiqa
+    type: beir
+    n_queries: 200
+  # - name: hotpotqa            # uncomment to add HotpotQA (direct download)
+  #   type: hotpotqa_distractor
+  #   n_queries: 500
+
+retrieval:
+  top_k: 10
+  bm25_k1: 1.5
+  bm25_b: 0.75
+
+models:
+  nli: cross-encoder/nli-deberta-v3-small
+  embedder: sentence-transformers/all-MiniLM-L6-v2
+  spacy: en_core_web_sm
+
+features:
+  redundancy_threshold: 0.85
+  short_max: 200
+  long_min: 800
+
+itemsets:
+  min_support: 0.05
+  max_len: 3
+  max_patterns: 200
+
+# --- Contrast-pattern miner (the new primary discovery step) ---------------
+patterns:
+  min_support: 0.03          # pattern must appear in >= this fraction of all queries
+  min_class_count: 5         # >= this many failures must contain the pattern
+  min_lift: 1.3              # lift threshold (P(fail|pat) / P(fail))
+  max_len: 3                 # max items per pattern
+  fdr_alpha: 0.10            # Benjamini-Hochberg q-value cutoff
+  rare_min_count_pos: 2      # for the rare-high-impact appendix miner
+  rare_max_support: 0.05
+  rare_min_p_pos: 0.80
+  # Diversification of the mined set for predictive stacking.
+  # We diversify on the COVERAGE (set of queries each pattern matches), not on
+  # item overlap, because two patterns can share zero items and still match
+  # identical query sets when items are correlated in the data.
+  stack_top_k: 30
+  stack_max_query_jaccard: 0.5
+
+mining:
+  K_grid: [4, 6, 8, 10, 12, 16]
+  random_state: 42
+  methods: [gmm, kmeans]
+
+paths:
+  data_dir: data
+  cache_dir: cache
+  out_dir: outputs
+
+device: auto      # auto | cpu | cuda
+
+batch_size:
+  nli: 32
+  embed: 64
+
+# ---------------------------------------------------------------------------
+# Labels: which Y to mine on.
+#   retrieval   = top-k BM25 misses the gold passage. Dominated by score_spread.
+#   generation  = LLM-generated answer not entailed by any gold passage (via NLI).
+# When labels='generation' and condition_on_retrieval_success=true, we restrict
+# to queries where retrieval succeeded — destroys the score_spread shortcut and
+# forces content patterns to do the work. This is the move that converts the
+# WEAK verdict to STRONG in the paper.
+labels: retrieval                       # set to 'generation' after running 02b
+condition_on_retrieval_success: true
+
+generation:
+  model: Qwen/Qwen2.5-1.5B-Instruct        # alt: Qwen/Qwen2.5-1.5B-Instruct (2x faster CPU)
+  max_new_tokens: 80
+
+  # Labeling (02c reads cached generations and applies these rules):
+  #   label_threshold_mode: 'fixed' uses label_threshold directly; 'auto' uses
+  #     a percentile of the data targeting target_fail_rate. 'auto' is
+  #     recommended because cosine-similarity distributions shift with the
+  #     dataset, and a percentile-based threshold guarantees a non-degenerate
+  #     label set.
+  label_threshold_mode: auto
+  label_threshold: 0.40                 # used only when mode='fixed'
+  target_fail_rate: 0.35                # used only when mode='auto'

@@ -1,0 +1,118 @@
+"""05b_pattern_eval.py
+Predictive evaluation of mined patterns.
+
+Reads:    outputs/pattern_transactions.pkl
+          outputs/contrast_patterns.pkl
+          outputs/failure_labels.csv
+          outputs/retrievals.pkl
+          outputs/passage_attrs.pkl
+          outputs/histograms.csv
+          outputs/itemset_indicators.csv  (only used for the legacy 'full_signature' baseline)
+Writes:   outputs/baseline_aucs_regularized.csv  (the corrected baseline table)
+          outputs/pattern_predictive_summary.csv (patterns-only / stacked AUC)
+          outputs/pattern_coverage_curve.csv     (operational curve)
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.baselines.predictors import baseline_results  # noqa: E402
+from src.evaluation.pattern_eval import (  # noqa: E402
+    pattern_only_auc,
+    precision_at_coverage,
+    stacked_baseline_plus_patterns_auc,
+)
+from src.mining.contrast_patterns import pattern_coverage_matrix  # noqa: E402
+from src.utils.io import ensure_dir, load_pickle, save_csv  # noqa: E402
+from src.utils.logging import get_logger  # noqa: E402
+
+
+def main(cfg_path):
+    cfg = yaml.safe_load(Path(cfg_path).read_text(encoding="utf-8"))
+    out_dir = Path(cfg["paths"]["out_dir"])
+    ensure_dir(out_dir)
+    log = get_logger(log_file=os.path.join("logs", "05b_pattern_eval.log"))
+
+    blob = load_pickle(out_dir / "retrievals.pkl")
+    per_query_attrs = load_pickle(out_dir / "passage_attrs.pkl")
+    hist_df = pd.read_csv(out_dir / "histograms.csv").set_index("qid")
+    item_df = pd.read_csv(out_dir / "itemset_indicators.csv").set_index("qid")
+    tx_blob = load_pickle(out_dir / "pattern_transactions.pkl")
+    T = tx_blob["transactions"]
+    qids_all = tx_blob["qids"]
+    patterns_df = load_pickle(out_dir / "contrast_patterns.pkl")
+    fail_df = pd.read_csv(out_dir / "failure_labels.csv")
+    y_dict = {
+        row["qid"]: (None if pd.isna(row["fail"]) else int(row["fail"]))
+        for _, row in fail_df.iterrows()
+    }
+    qids = [q for q in qids_all if y_dict.get(q) is not None]
+    y = np.array([y_dict[q] for q in qids])
+    base_rate = float(y.mean())
+    n_pos = int(y.sum())
+    log.info(f"Eval set: n={len(qids)}, n_pos={n_pos}, base_rate={base_rate:.3f}")
+
+    # 1) Fixed (regularized) baseline AUCs — replaces baseline_aucs.csv as the
+    #    honest table. We keep the old one on disk for diff visibility.
+    bdf = baseline_results(
+        hist_df.loc[qids], item_df.loc[qids], blob["retrievals"], per_query_attrs, y_dict
+    )
+    save_csv(bdf, out_dir / "baseline_aucs_regularized.csv")
+    log.info("Regularized baseline AUCs:\n" +
+             bdf.sort_values("auc", ascending=False).to_string(index=False))
+
+    # 2) Build pattern coverage matrix for the eval queries
+    items_list = list(patterns_df["items"]) if (len(patterns_df) and "items" in patterns_df.columns) else []
+    cov_df = pattern_coverage_matrix(T.loc[qids], items_list) if items_list else \
+        pd.DataFrame(index=qids)
+
+    # 3) Patterns-only AUC
+    p_only_auc = pattern_only_auc(cov_df, y_dict, qids) if cov_df.shape[1] else float("nan")
+    log.info(f"Patterns-only CV AUC: {p_only_auc:.4f}")
+
+    # 4) Stacked AUC: baselines + patterns
+    # Use the three strongest retrieval baselines as the comparator stack.
+    # These cover what a reviewer would build with no discovery whatsoever.
+    feat_rows = []
+    for q in qids:
+        scs = [s for _, s in blob["retrievals"].get(q, [])]
+        feat_rows.append(
+            [
+                float(np.mean(scs)) if scs else 0.0,
+                float(scs[0]) if scs else 0.0,
+                float(scs[0] - scs[-1]) if len(scs) > 1 else 0.0,
+            ]
+        )
+    base_X = np.array(feat_rows)
+    auc_b, auc_stack, delta = stacked_baseline_plus_patterns_auc(base_X, cov_df, y_dict, qids)
+    log.info(f"Baselines-only AUC: {auc_b:.4f}  |  Baselines+patterns AUC: {auc_stack:.4f}  |  delta: {delta:+.4f}")
+
+    summary = pd.DataFrame(
+        [
+            {"name": "best_single_baseline", "auc": float(np.nanmax(bdf["auc"])) if len(bdf) else float("nan")},
+            {"name": "retrieval_stack_baselines", "auc": auc_b},
+            {"name": "patterns_only", "auc": p_only_auc},
+            {"name": "baselines+patterns", "auc": auc_stack},
+            {"name": "delta_stack_over_baselines", "auc": delta},
+        ]
+    )
+    save_csv(summary, out_dir / "pattern_predictive_summary.csv")
+
+    # 5) Coverage-vs-precision operational curve
+    cov_curve = precision_at_coverage(cov_df, patterns_df, y_dict, qids)
+    save_csv(cov_curve, out_dir / "pattern_coverage_curve.csv")
+    if len(cov_curve):
+        log.info("Pattern coverage curve (first 5 rows):\n" + cov_curve.head().to_string(index=False))
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True)
+    main(ap.parse_args().config)
