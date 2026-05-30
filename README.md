@@ -1,4 +1,4 @@
-﻿# Mining Contrast Patterns over Retrieved Evidence Sets for Generation-Failure Discovery in RAG
+# Mining Contrast Patterns over Retrieved Evidence Sets for Generation-Failure Discovery in RAG
 
 Code and configuration accompanying the ICDM 2026 submission of the same title.
 
@@ -24,8 +24,8 @@ python scripts/06b_pattern_report.py       --config config/default.yaml
 
 ## Robustness variants
 
-- **Dense retrieval (BGE-small):** run `scripts/01b_retrieve_dense.py` instead of 01_retrieve.py, then use `config/dense.yaml` for the remaining steps. `cache_dir` is set to `cache_dense` to isolate from the primary featurization cache.
-- **Cross-family generator (Phi-3.5-mini-instruct):** copy primary `retrievals.pkl`, `passage_attrs.pkl`, and `histograms.csv` into `outputs_phi/`, then run the pipeline from 02b onwards with `config/phi.yaml`.
+* **Dense retrieval (BGE-small):** run `scripts/01b_retrieve_dense.py` instead of `01_retrieve.py`, then use `config/dense.yaml` for the remaining steps. `cache_dir` is set to `cache_dense` to isolate from the primary featurization cache.
+* **Cross-family generator (Phi-3.5-mini-instruct):** copy primary `retrievals.pkl`, `passage_attrs.pkl`, and `histograms.csv` into `outputs_phi/`, then run the pipeline from 02b onwards with `config/phi.yaml`.
 
 ## Running the Phi-3.5-mini variant on a free GPU
 
@@ -38,6 +38,26 @@ python scripts/08_robustness_compare.py
 ```
 
 Writes `outputs_robustness/robustness_comparison.csv`.
+
+## Expected headline results
+
+| Condition                          |   n | Pattern AUC | Baseline AUC |
+| ---------------------------------- | --: | ----------: | -----------: |
+| BM25 + Qwen-2.5-1.5B-Instruct      | 536 |       0.612 |        0.498 |
+| BGE-small + Qwen-2.5-1.5B-Instruct | 599 |       0.738 |        0.676 |
+| BM25 + Phi-3.5-mini-instruct       | 536 |       0.693 |        0.478 |
+
+The primary result is produced by the standard pipeline above. The dense-retrieval and Phi-3.5-mini variants are produced using the robustness settings described above. The three runs can be summarized with:
+
+```bash
+python scripts/08_robustness_compare.py
+```
+
+This writes:
+
+```bash
+outputs_robustness/robustness_comparison.csv
+```
 
 ## Hardware
 
